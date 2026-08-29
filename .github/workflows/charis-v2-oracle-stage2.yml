@@ -1,0 +1,100 @@
+name: CHARIS V2 oracle stage2 cohort
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/charis-v2-oracle-stage2.yml'
+      - 'oracle_stage2_patient.py'
+      - 'oracle_stage2_summary.py'
+      - 'ORACLE_STAGE2_COHORT_PROTOCOL.md'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PRIMARY_RUN_ID: '33218500889'
+  PRIMARY_COMMIT: '3a68ed7fdb0108d0fdaeb686c3783bbdf2726455'
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  oracle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        patient: [1,2,3,4,5,6,7,8,9,10,11,12,13]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install frozen analysis dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install 'numba>=0.65,<0.66'
+      - name: Download frozen blind artifact from primary run
+        uses: actions/download-artifact@v4
+        with:
+          name: blind-charis${{ matrix.patient }}
+          path: blind
+          github-token: ${{ github.token }}
+          run-id: ${{ env.PRIMARY_RUN_ID }}
+      - name: Download paired scoring artifact from primary run
+        uses: actions/download-artifact@v4
+        with:
+          name: score-charis${{ matrix.patient }}
+          path: score
+          github-token: ${{ github.token }}
+          run-id: ${{ env.PRIMARY_RUN_ID }}
+      - name: Verify frozen artifact contents
+        run: |
+          (cd blind && sha256sum -c SHA256SUMS.txt)
+          (cd score && sha256sum -c SHA256SUMS.txt)
+      - name: Run frozen Stage-2 oracle profile
+        env:
+          P: ${{ matrix.patient }}
+        run: |
+          mkdir -p oracle
+          python oracle_stage2_patient.py \
+            "blind/charis${P}_V2_blind.csv" \
+            "score/charis${P}_V2_paired_1Hz.csv" \
+            "oracle/charis${P}_oracle_stage2.json"
+      - name: Hash patient oracle output
+        run: (cd oracle && sha256sum * | sort > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oracle-stage2-charis${{ matrix.patient }}
+          path: oracle/
+          if-no-files-found: error
+          retention-days: 90
+
+  cohort:
+    needs: oracle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: oracle-stage2-charis*
+          path: oracle_inputs
+      - run: python oracle_stage2_summary.py oracle_inputs oracle_cohort
+      - name: Add oracle summary to Actions page
+        run: cat oracle_cohort/oracle_stage2_cohort_summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oracle-stage2-cohort-results
+          path: oracle_cohort/
+          if-no-files-found: error
+          retention-days: 90
